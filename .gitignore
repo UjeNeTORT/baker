@@ -1,0 +1,9 @@
+.vscode
+
+*.out
+*.o
+
+baker
+baker_no_asan
+
+
