@@ -9,6 +9,7 @@
 #include <string.h>
 #include <sys/stat.h>
 #include <sys/types.h>
+#include <sys/wait.h>
 #include <unistd.h>
 
 const char HELP_MSG[] =
@@ -19,20 +20,27 @@ const char HELP_MSG[] =
   "-s [directory] -- source dir files in which to backup\n"
   "--src             -- alias to -s\n\n";
 
+const char BACKUP_FILE_POSTFIX[] = ".bak";
+const char *const IGNORED_DIRS[] = {
+  ".",
+  "..",
+};
+
 struct Flags {
   uint32_t is_force;
   uint32_t has_src;
   uint32_t has_dst;
 };
 
-
 void pollBackup(const char * dst_dir, const char * src_dir);
 int backup(const char * dst_dir, const char * src_dir);
-
-void archive(const char * const fpath);
+int backupFile(const char *dst_dir, const char *src_dir, const char *filename);
+void archive(const char * fpath);
 void printHelp();
 
+int isDirIgnored(const char *dir_name);
 int isDirValid(const char * dir);
+int createDir(const char *dst_dir);
 
 int main(int argc, char *argv[]) {
   if (argc == 1) {
@@ -43,8 +51,8 @@ int main(int argc, char *argv[]) {
   }
 
   Flags flags = {0};
-  char dst_dir[_POSIX_ARG_MAX] = "";
-  char src_dir[_POSIX_ARG_MAX] = "";
+  char dst_dir[PATH_MAX] = "";
+  char src_dir[PATH_MAX] = "";
 
   uint32_t uargc = argc;
   for (uint32_t i = 1; i < uargc; i++) {
@@ -60,7 +68,7 @@ int main(int argc, char *argv[]) {
     }
 
     if (!strcmp(argv[i], "-d") ||
-        !strcmp(argv[i], "--dir")) {
+        !strcmp(argv[i], "--dst")) {
 
         if (i + 1 == uargc) {
           fprintf(stderr, "ERROR: missing directory name after %s\n", argv[i]);
@@ -113,6 +121,7 @@ int main(int argc, char *argv[]) {
                     "     %s\n", cwd);
   }
 
+
   // destination dir final settings
   if (!flags.has_dst && !flags.is_force) {
     fprintf(stderr, "ERROR: destination directory not specified\n"
@@ -121,15 +130,17 @@ int main(int argc, char *argv[]) {
   }
 
   if (!flags.has_dst && flags.is_force) {
-    strcpy(dst_dir, src_dir);
-    strcat(dst_dir, ".bak");
+    strcat(dst_dir, src_dir);
+    strcat(dst_dir, BACKUP_FILE_POSTFIX);
 
     fprintf(stderr, "LOG: creating destination directory (--force used)\n"
                     "     %s\n", dst_dir);
 
-    execl("/bin/mkdir", "/bin/mkdir", dst_dir, /*sentinel*/(char *)NULL);
+    createDir(dst_dir);
   }
 
+  if (flags.has_dst && flags.is_force)
+    createDir(dst_dir);
 
   pollBackup(dst_dir, src_dir);
 
@@ -142,7 +153,7 @@ void pollBackup(const char *const dst_dir, const char *const src_dir) {
 
   while(1) {
     backup(dst_dir, src_dir);
-    usleep(1 << 14);
+    usleep(1'000'000);
   }
 }
 
@@ -156,23 +167,96 @@ int backup(const char *dst_dir, const char *src_dir) {
     return 1;
   }
 
+  createDir(dst_dir);
+
+  const char *file_format = NULL; // for error handling
   dirent *curr_dir_content = readdir(curr_dir);
+
   while (curr_dir_content != NULL) {
-    printf("%s\n", curr_dir_content->d_name);
+    switch (curr_dir_content->d_type) {
+      case DT_REG:
+      {
+        // bak_name = file_name + '/' bak_postfix
+        const char *file_name = curr_dir_content->d_name;
+
+        backupFile(dst_dir, src_dir, file_name);
+        break;
+      }
+
+      case DT_DIR:
+      {
+        char *dir_name = curr_dir_content->d_name;
+        if (isDirIgnored(dir_name)) break;
+
+        // dst_dir += sub_dir
+        char next_dst_dir[PATH_MAX] = "";
+        strcat(next_dst_dir, dst_dir); strcat(next_dst_dir, dir_name);
+
+        // src_dir += sub_dir
+        char next_src_dir[PATH_MAX] = "";
+        strcat(next_src_dir, src_dir); strcat(next_src_dir, dir_name);
+
+        strcat(next_dst_dir, "/"); strcat(next_src_dir, "/");
+
+        backup(next_dst_dir, next_src_dir);
+        break;
+      }
+
+      case DT_BLK:     file_format = "block device";
+      case DT_CHR:     file_format = "character device";
+      case DT_FIFO:    file_format = "named pipe (FIFO)";
+      case DT_LNK:     file_format = "symbolic link";
+      case DT_SOCK:    file_format = "UNIX domain socket";
+      case DT_UNKNOWN: file_format = "unknown";
+
+      default:
+        fprintf(stderr, "ERROR: unsupported file format: %s\n",
+                          file_format ? file_format : "unsupported dirent d_type");
+        break;
+    }
+
     curr_dir_content = readdir(curr_dir);
   }
 
   return 0;
 }
 
-void archive(const char *const fpath) {
+int backupFile(const char *dst_dir, const char *src_dir, const char *filename) {
+  assert(dst_dir); assert(src_dir);
+
+  char src_path[PATH_MAX] = ""; strcat(src_path, src_dir);
+  strcat(src_path, "/"); strcat (src_path, filename);
+
+  char dst_path[PATH_MAX] = ""; strcat(dst_path, dst_dir);
+  strcat(dst_path, "/"); strcat (dst_path, filename);
+  strcat(dst_path, BACKUP_FILE_POSTFIX);
+
+  int status = 0;
+  if (fork() == 0) exit(execl("/bin/cp", "/bin/cp", src_path, dst_path, /*sentinel*/(char *)NULL));
+  waitpid(-1, &status, 0);
+
+  archive(dst_path);
+
+  return 0;
+}
+
+void archive(const char * fpath) {
   assert(fpath);
 
-  fprintf(stderr, "Archiving %s\n", fpath);
-  execl("gzip", "gzip", fpath, /*sentinel*/ (char *)NULL);
+  fprintf(stderr, "ARCHIVING: %s\n", fpath);
+  // execl("gzip", "gzip", fpath, /*sentinel*/ (char *)NULL);
 }
 
 void printHelp() { fprintf(stdout, HELP_MSG); }
+
+int isDirIgnored(const char *dir_name) {
+  assert(dir_name);
+
+  for (uint32_t i = 0; i < sizeof(IGNORED_DIRS) / sizeof(*IGNORED_DIRS); i++)
+    if (!strcmp(dir_name, IGNORED_DIRS[i])) return 1;
+
+  return 0;
+}
 
 int isDirValid(const char * dir) {
   if (!dir) return 0;
@@ -180,8 +264,18 @@ int isDirValid(const char * dir) {
   struct stat dir_stat = {};
   if (!stat(dir, &dir_stat)) return S_ISDIR(dir_stat.st_mode);
 
-  fprintf(stderr, "%s: ", __FUNCTION__);
-  perror("stat()");
-
   return 0;
+}
+
+int createDir(const char *dst_dir) {
+  assert(dst_dir);
+
+    if (!isDirValid(dst_dir)) { // directory does not exist
+      if (!fork()) exit(execl("/bin/mkdir", "/bin/mkdir", dst_dir, /*sentinel*/(char *)NULL));
+
+      int status = 0;
+      while(wait(&status) > 0) ;
+    }
+
+    return 0;
 }
