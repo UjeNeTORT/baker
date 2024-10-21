@@ -218,6 +218,8 @@ int backup(const char *dst_dir, const char *src_dir) {
     curr_dir_content = readdir(curr_dir);
   }
 
+  closedir(curr_dir);
+
   return 0;
 }
 
@@ -243,8 +245,13 @@ int backupFile(const char *dst_dir, const char *src_dir, const char *filename) {
 void archive(const char * fpath) {
   assert(fpath);
 
-  fprintf(stderr, "ARCHIVING: %s\n", fpath);
-  // execl("gzip", "gzip", fpath, /*sentinel*/ (char *)NULL);
+  // fprintf(stderr, "ARCHIVING: %s\n", fpath);
+
+  pid_t pid = fork();
+  if (pid == 0) exit(execl("/bin/gzip", "/bin/gzip", "-v", fpath, /*sentinel*/ (char *)NULL));
+
+  int status = 0;
+  waitpid(pid, &status, 0);
 }
 
 void printHelp() { fprintf(stdout, HELP_MSG); }
