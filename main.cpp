@@ -233,6 +233,22 @@ int backupFile(const char *dst_dir, const char *src_dir, const char *filename) {
   strcat(dst_path, "/"); strcat (dst_path, filename);
   strcat(dst_path, BACKUP_FILE_POSTFIX);
 
+  char dst_compressed_path[PATH_MAX] = "";
+  strcat(dst_compressed_path, dst_path);
+  strcat(dst_compressed_path, ".gz");
+
+  // check if modified
+  struct stat src_attr = {};
+  stat(src_path, &src_attr);
+
+  struct stat dst_attr = {};
+  stat(dst_compressed_path, &dst_attr);
+
+  if ((uint64_t) dst_attr.st_mtim.tv_sec >= (uint64_t) src_attr.st_mtim.tv_sec) return 0;
+
+  fprintf(stderr, "FILE MODIFIED: %s\n", src_path);
+
+  // backup if modified
   int status = 0;
   if (fork() == 0) exit(execl("/bin/cp", "/bin/cp", src_path, dst_path, /*sentinel*/(char *)NULL));
   waitpid(-1, &status, 0);
